@@ -44,6 +44,8 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.CALL_PHONE" />
               <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+              <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <application
                   android:allowBackup="false"
                   android:label="AutoCall Pro"
@@ -55,40 +57,269 @@ jobs:
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
-                      <intent-filter>
-                          <action android:name="android.intent.action.DIAL" />
-                          <category android:name="android.intent.category.DEFAULT" />
-                      </intent-filter>
-                      <intent-filter>
-                          <action android:name="android.intent.action.DIAL" />
-                          <category android:name="android.intent.category.DEFAULT" />
-                          <data android:scheme="tel" />
-                      </intent-filter>
-                      <intent-filter>
-                          <action android:name="android.intent.action.VIEW" />
-                          <category android:name="android.intent.category.DEFAULT" />
-                          <category android:name="android.intent.category.BROWSABLE" />
-                          <data android:scheme="tel" />
-                      </intent-filter>
                   </activity>
                   <service
-                      android:name=".AutoCallInCallService"
-                      android:permission="android.permission.BIND_INCALL_SERVICE"
-                      android:exported="true">
-                      <meta-data android:name="android.telecom.IN_CALL_SERVICE_UI" android:value="true" />
-                      <meta-data android:name="android.telecom.IN_CALL_SERVICE_RINGING" android:value="true" />
-                      <intent-filter>
-                          <action android:name="android.telecom.InCallService" />
-                      </intent-filter>
-                  </service>
+                      android:name=".CallLoopService"
+                      android:exported="false" />
               </application>
           </manifest>
           EOF
-      - name: Fix Kotlin files
+      - name: Write Kotlin files
         run: |
           D=project/app/src/main/java/com/example/autocallpro
-          sed -i 's/singleLine = true/isSingleLine = true/' $D/MainActivity.kt
-          sed -i 's/catch (_: Exception)/catch (e: Exception)/' $D/AutoCallInCallService.kt
+          rm -f $D/AutoCallInCallService.kt
+          cat > $D/MainActivity.kt << 'EOF'
+          package com.example.autocallpro
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.os.Bundle
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+              private lateinit var numberInput: EditText
+              private lateinit var durationInput: EditText
+              private lateinit var status: TextView
+              private val perms = arrayOf(
+                  Manifest.permission.CALL_PHONE,
+                  Manifest.permission.READ_PHONE_STATE,
+                  Manifest.permission.ANSWER_PHONE_CALLS
+              )
+              private val prefs by lazy { getSharedPreferences("autocall", Context.MODE_PRIVATE) }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  buildUi()
+                  numberInput.setText(prefs.getString("number", ""))
+                  durationInput.setText(prefs.getInt("duration", 25).toString())
+                  status.text = "Ready. Enter number and seconds, then press START."
+              }
+
+              private fun lp(): LinearLayout.LayoutParams {
+                  val p = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT
+                  )
+                  p.bottomMargin = 12
+                  return p
+              }
+
+              private fun buildUi() {
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(24, 28, 24, 24)
+
+                  val title = TextView(this)
+                  title.text = "AutoCall Pro"
+                  title.textSize = 26f
+                  root.addView(title, lp())
+
+                  numberInput = EditText(this)
+                  numberInput.hint = "Phone number"
+                  numberInput.inputType = android.text.InputType.TYPE_CLASS_PHONE
+                  root.addView(numberInput, lp())
+
+                  durationInput = EditText(this)
+                  durationInput.hint = "Seconds before hang up (5 to 180)"
+                  durationInput.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                  root.addView(durationInput, lp())
+
+                  val start = Button(this)
+                  start.text = "START AUTO-REDIAL"
+                  start.setOnClickListener { startLoop() }
+                  root.addView(start, lp())
+
+                  val stop = Button(this)
+                  stop.text = "STOP"
+                  stop.setOnClickListener { stopLoop() }
+                  root.addView(stop, lp())
+
+                  status = TextView(this)
+                  status.textSize = 15f
+                  root.addView(status, lp())
+
+                  val note = TextView(this)
+                  note.text = "Test only with a person who expects your calls. Press STOP to end the loop."
+                  note.textSize = 13f
+                  root.addView(note, lp())
+
+                  val scroll = ScrollView(this)
+                  scroll.addView(root)
+                  setContentView(scroll)
+              }
+
+              private fun startLoop() {
+                  val number = numberInput.text.toString().trim()
+                  val seconds = durationInput.text.toString().toIntOrNull() ?: 25
+                  if (number.length < 6 || seconds < 5 || seconds > 180) {
+                      status.text = "Enter a valid number and seconds from 5 to 180."
+                      return
+                  }
+                  val missing = perms.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+                  if (missing.isNotEmpty()) {
+                      requestPermissions(missing.toTypedArray(), 11)
+                      status.text = "Allow all permission prompts, then press START again."
+                      return
+                  }
+                  prefs.edit().putString("number", number).putInt("duration", seconds).apply()
+                  val i = Intent(this, CallLoopService::class.java)
+                  i.putExtra("number", number)
+                  i.putExtra("seconds", seconds)
+                  startForegroundService(i)
+                  status.text = "Auto-redial ON for " + number + ", " + seconds + " sec. Press STOP to end."
+              }
+
+              private fun stopLoop() {
+                  stopService(Intent(this, CallLoopService::class.java))
+                  status.text = "Stopped."
+              }
+
+              override fun onRequestPermissionsResult(
+                  requestCode: Int,
+                  permissions: Array<out String>,
+                  grantResults: IntArray
+              ) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  status.text = "Permissions updated. Press START again."
+              }
+          }
+          EOF
+          cat > $D/CallLoopService.kt << 'EOF'
+          package com.example.autocallpro
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.telecom.TelecomManager
+          import android.telephony.PhoneStateListener
+          import android.telephony.TelephonyManager
+
+          class CallLoopService : Service() {
+              private val handler = Handler(Looper.getMainLooper())
+              private var number = ""
+              private var seconds = 25
+              private var running = false
+              private var wasOffhook = false
+              private var endRunnable: Runnable? = null
+              private var redialRunnable: Runnable? = null
+              private var tele: TelephonyManager? = null
+              private var listener: PhoneStateListener? = null
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  number = intent?.getStringExtra("number") ?: ""
+                  seconds = intent?.getIntExtra("seconds", 25) ?: 25
+                  startForeground(1, buildNotification())
+                  if (number.isBlank()) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  if (!running) {
+                      running = true
+                      registerListener()
+                      placeCall()
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun buildNotification(): Notification {
+                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(
+                      NotificationChannel("autocall", "AutoCall", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  return Notification.Builder(this, "autocall")
+                      .setContentTitle("AutoCall Pro is running")
+                      .setContentText("Open the app and press STOP to end.")
+                      .setSmallIcon(android.R.drawable.sym_action_call)
+                      .build()
+              }
+
+              private fun registerListener() {
+                  tele = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+                  listener = object : PhoneStateListener() {
+                      override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                          handleState(state)
+                      }
+                  }
+                  tele?.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
+              }
+
+              private fun handleState(state: Int) {
+                  if (!running) return
+                  if (state == TelephonyManager.CALL_STATE_OFFHOOK) {
+                      if (!wasOffhook) {
+                          wasOffhook = true
+                          redialRunnable?.let { handler.removeCallbacks(it) }
+                          endRunnable?.let { handler.removeCallbacks(it) }
+                          val r = Runnable { hangUp() }
+                          endRunnable = r
+                          handler.postDelayed(r, seconds * 1000L)
+                      }
+                  } else if (state == TelephonyManager.CALL_STATE_IDLE) {
+                      if (wasOffhook) {
+                          wasOffhook = false
+                          endRunnable?.let { handler.removeCallbacks(it) }
+                          val r = Runnable { placeCall() }
+                          redialRunnable = r
+                          handler.postDelayed(r, 1500L)
+                      }
+                  }
+              }
+
+              private fun hangUp() {
+                  try {
+                      val tm = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+                      tm.endCall()
+                  } catch (e: Exception) {
+                      running = false
+                      stopSelf()
+                  }
+              }
+
+              private fun placeCall() {
+                  if (!running) return
+                  try {
+                      val tm = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+                      tm.placeCall(Uri.fromParts("tel", number, null), Bundle())
+                  } catch (e: Exception) {
+                      running = false
+                      stopSelf()
+                  }
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  endRunnable?.let { handler.removeCallbacks(it) }
+                  redialRunnable?.let { handler.removeCallbacks(it) }
+                  tele?.listen(listener, PhoneStateListener.LISTEN_NONE)
+                  if (wasOffhook) {
+                      try {
+                          val tm = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+                          tm.endCall()
+                      } catch (e: Exception) {
+                      }
+                  }
+                  super.onDestroy()
+              }
+          }
+          EOF
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
