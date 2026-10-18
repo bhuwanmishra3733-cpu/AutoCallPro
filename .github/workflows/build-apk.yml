@@ -38,6 +38,11 @@ jobs:
               implementation("androidx.core:core-ktx:1.13.1")
           }
           EOF
+      - name: Fix Kotlin files
+        run: |
+          D=project/app/src/main/java/com/example/autocallpro
+          sed -i 's/singleLine = true/isSingleLine = true/' $D/MainActivity.kt
+          sed -i 's/catch (_: Exception)/catch (e: Exception)/' $D/AutoCallInCallService.kt
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
